@@ -1,0 +1,620 @@
+# ===================================
+# VERCEL DEPLOYMENT CONFIGURATION
+# ===================================
+
+# vercel.json
+{
+  "name": "bossbuddy",
+  "version": 2,
+  "builds": [
+    {
+      "src": "package.json",
+      "use": "@vercel/next"
+    }
+  ],
+  "routes": [
+    {
+      "src": "/api/(.*)",
+      "headers": {
+        "Cache-Control": "no-cache, no-store, must-revalidate",
+        "X-Content-Type-Options": "nosniff",
+        "X-Frame-Options": "DENY",
+        "X-XSS-Protection": "1; mode=block"
+      }
+    },
+    {
+      "src": "/(.*\\.(js|css|png|jpg|jpeg|gif|ico|svg|woff|woff2))",
+      "headers": {
+        "Cache-Control": "public, max-age=31536000, immutable"
+      }
+    }
+  ],
+  "env": {
+    "NEXT_PUBLIC_APP_URL": "https://bossbuddy.ai",
+    "NODE_ENV": "production"
+  },
+  "regions": ["iad1", "sfo1", "lhr1"],
+  "functions": {
+    "app/api/rewrite/route.ts": {
+      "maxDuration": 30,
+      "memory": 1024
+    },
+    "app/api/webhooks/paypal/route.ts": {
+      "maxDuration": 60
+    }
+  }
+}
+
+# ===================================
+# GITHUB ACTIONS CI/CD
+# ===================================
+
+# .github/workflows/main.yml
+name: CI/CD Pipeline
+
+on:
+  push:
+    branches: [main, develop]
+  pull_request:
+    branches: [main]
+
+env:
+  NODE_VERSION: '18.x'
+  VERCEL_ORG_ID: ${{ secrets.VERCEL_ORG_ID }}
+  VERCEL_PROJECT_ID: ${{ secrets.VERCEL_PROJECT_ID }}
+
+jobs:
+  # Lint and Type Check
+  quality:
+    name: Code Quality
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v3
+      
+      - name: Setup Node.js
+        uses: actions/setup-node@v3
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: 'npm'
+      
+      - name: Install dependencies
+        run: npm ci
+      
+      - name: Run ESLint
+        run: npm run lint
+      
+      - name: TypeScript type check
+        run: npm run type-check
+      
+      - name: Check formatting
+        run: npm run format:check
+
+  # Unit Tests
+  test:
+    name: Unit Tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v3
+      
+      - name: Setup Node.js
+        uses: actions/setup-node@v3
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: 'npm'
+      
+      - name: Install dependencies
+        run: npm ci
+      
+      - name: Run tests
+        run: npm run test:ci
+        env:
+          DATABASE_URL: ${{ secrets.DATABASE_URL_TEST }}
+      
+      - name: Upload coverage
+        uses: codecov/codecov-action@v3
+        with:
+          token: ${{ secrets.CODECOV_TOKEN }}
+
+  # E2E Tests
+  e2e:
+    name: E2E Tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v3
+      
+      - name: Setup Node.js
+        uses: actions/setup-node@v3
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: 'npm'
+      
+      - name: Install dependencies
+        run: npm ci
+      
+      - name: Install Playwright
+        run: npx playwright install --with-deps
+      
+      - name: Run E2E tests
+        run: npm run test:e2e
+        env:
+          TEST_URL: http://localhost:3000
+      
+      - name: Upload test artifacts
+        if: failure()
+        uses: actions/upload-artifact@v3
+        with:
+          name: playwright-report
+          path: playwright-report/
+
+  # Security Scan
+  security:
+    name: Security Scan
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v3
+      
+      - name: Run Snyk security scan
+        uses: snyk/actions/node@master
+        env:
+          SNYK_TOKEN: ${{ secrets.SNYK_TOKEN }}
+      
+      - name: Run npm audit
+        run: npm audit --production
+
+  # Build and Deploy Preview
+  preview:
+    name: Deploy Preview
+    runs-on: ubuntu-latest
+    needs: [quality, test]
+    if: github.event_name == 'pull_request'
+    steps:
+      - uses: actions/checkout@v3
+      
+      - name: Install Vercel CLI
+        run: npm i -g vercel@latest
+      
+      - name: Pull Vercel Environment
+        run: vercel pull --yes --environment=preview --token=${{ secrets.VERCEL_TOKEN }}
+      
+      - name: Build Project
+        run: vercel build --token=${{ secrets.VERCEL_TOKEN }}
+      
+      - name: Deploy Preview
+        run: |
+          DEPLOYMENT_URL=$(vercel deploy --prebuilt --token=${{ secrets.VERCEL_TOKEN }})
+          echo "DEPLOYMENT_URL=$DEPLOYMENT_URL" >> $GITHUB_ENV
+      
+      - name: Comment PR
+        uses: actions/github-script@v6
+        with:
+          script: |
+            github.rest.issues.createComment({
+              issue_number: context.issue.number,
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              body: `🚀 Preview deployed to: ${process.env.DEPLOYMENT_URL}`
+            })
+
+  # Production Deployment
+  deploy:
+    name: Deploy to Production
+    runs-on: ubuntu-latest
+    needs: [quality, test, security]
+    if: github.ref == 'refs/heads/main' && github.event_name == 'push'
+    steps:
+      - uses: actions/checkout@v3
+      
+      - name: Install Vercel CLI
+        run: npm i -g vercel@latest
+      
+      - name: Pull Vercel Environment
+        run: vercel pull --yes --environment=production --token=${{ secrets.VERCEL_TOKEN }}
+      
+      - name: Build Project
+        run: vercel build --prod --token=${{ secrets.VERCEL_TOKEN }}
+      
+      - name: Deploy to Production
+        run: vercel deploy --prebuilt --prod --token=${{ secrets.VERCEL_TOKEN }}
+      
+      - name: Run Migrations
+        run: |
+          npm run db:migrate:deploy
+        env:
+          DATABASE_URL: ${{ secrets.DATABASE_URL }}
+      
+      - name: Purge CDN Cache
+        run: |
+          curl -X POST "https://api.cloudflare.com/client/v4/zones/${{ secrets.CLOUDFLARE_ZONE_ID }}/purge_cache" \
+            -H "X-Auth-Email: ${{ secrets.CLOUDFLARE_EMAIL }}" \
+            -H "X-Auth-Key: ${{ secrets.CLOUDFLARE_API_KEY }}" \
+            -H "Content-Type: application/json" \
+            --data '{"purge_everything":true}'
+      
+      - name: Notify Slack
+        uses: 8398a7/action-slack@v3
+        with:
+          status: ${{ job.status }}
+          text: 'Production deployment completed'
+          webhook_url: ${{ secrets.SLACK_WEBHOOK }}
+
+# ===================================
+# DOCKER CONFIGURATION
+# ===================================
+
+# Dockerfile
+FROM node:18-alpine AS base
+
+# Install dependencies only when needed
+FROM base AS deps
+RUN apk add --no-cache libc6-compat
+WORKDIR /app
+
+# Install dependencies
+COPY package.json package-lock.json* ./
+RUN npm ci
+
+# Rebuild the source code only when needed
+FROM base AS builder
+WORKDIR /app
+COPY --from=deps /app/node_modules ./node_modules
+COPY . .
+
+# Build the application
+ENV NEXT_TELEMETRY_DISABLED 1
+RUN npm run build
+
+# Production image
+FROM base AS runner
+WORKDIR /app
+
+ENV NODE_ENV production
+ENV NEXT_TELEMETRY_DISABLED 1
+
+RUN addgroup --system --gid 1001 nodejs
+RUN adduser --system --uid 1001 nextjs
+
+# Copy built application
+COPY --from=builder /app/public ./public
+COPY --from=builder --chown=nextjs:nodejs /app/.next/standalone ./
+COPY --from=builder --chown=nextjs:nodejs /app/.next/static ./.next/static
+
+USER nextjs
+
+EXPOSE 3000
+
+ENV PORT 3000
+
+CMD ["node", "server.js"]
+
+# ===================================
+# DOCKER COMPOSE FOR LOCAL DEV
+# ===================================
+
+# docker-compose.yml
+version: '3.9'
+
+services:
+  app:
+    build:
+      context: .
+      dockerfile: Dockerfile
+      target: deps
+    command: npm run dev
+    volumes:
+      - .:/app
+      - /app/node_modules
+      - /app/.next
+    ports:
+      - "3000:3000"
+    environment:
+      - NODE_ENV=development
+      - DATABASE_URL=postgresql://postgres:password@db:5432/bossbuddy
+      - REDIS_URL=redis://redis:6379
+    depends_on:
+      - db
+      - redis
+
+  db:
+    image: postgres:15-alpine
+    environment:
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: password
+      POSTGRES_DB: bossbuddy
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    ports:
+      - "5432:5432"
+
+  redis:
+    image: redis:7-alpine
+    ports:
+      - "6379:6379"
+    volumes:
+      - redis_data:/data
+
+  adminer:
+    image: adminer
+    ports:
+      - "8080:8080"
+    depends_on:
+      - db
+
+volumes:
+  postgres_data:
+  redis_data:
+
+# ===================================
+# KUBERNETES DEPLOYMENT (OPTIONAL)
+# ===================================
+
+# k8s/deployment.yaml
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: bossbuddy-app
+  labels:
+    app: bossbuddy
+spec:
+  replicas: 3
+  selector:
+    matchLabels:
+      app: bossbuddy
+  template:
+    metadata:
+      labels:
+        app: bossbuddy
+    spec:
+      containers:
+      - name: bossbuddy
+        image: gcr.io/bossbuddy/app:latest
+        ports:
+        - containerPort: 3000
+        env:
+        - name: NODE_ENV
+          value: "production"
+        - name: DATABASE_URL
+          valueFrom:
+            secretKeyRef:
+              name: bossbuddy-secrets
+              key: database-url
+        resources:
+          requests:
+            memory: "256Mi"
+            cpu: "100m"
+          limits:
+            memory: "512Mi"
+            cpu: "500m"
+        livenessProbe:
+          httpGet:
+            path: /api/health
+            port: 3000
+          initialDelaySeconds: 30
+          periodSeconds: 10
+        readinessProbe:
+          httpGet:
+            path: /api/ready
+            port: 3000
+          initialDelaySeconds: 5
+          periodSeconds: 5
+
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: bossbuddy-service
+spec:
+  selector:
+    app: bossbuddy
+  ports:
+  - protocol: TCP
+    port: 80
+    targetPort: 3000
+  type: LoadBalancer
+
+---
+apiVersion: autoscaling/v2
+kind: HorizontalPodAutoscaler
+metadata:
+  name: bossbuddy-hpa
+spec:
+  scaleTargetRef:
+    apiVersion: apps/v1
+    kind: Deployment
+    name: bossbuddy-app
+  minReplicas: 2
+  maxReplicas: 10
+  metrics:
+  - type: Resource
+    resource:
+      name: cpu
+      target:
+        type: Utilization
+        averageUtilization: 70
+  - type: Resource
+    resource:
+      name: memory
+      target:
+        type: Utilization
+        averageUtilization: 80
+
+# ===================================
+# MONITORING & LOGGING
+# ===================================
+
+# monitoring/prometheus.yml
+global:
+  scrape_interval: 15s
+  evaluation_interval: 15s
+
+scrape_configs:
+  - job_name: 'bossbuddy'
+    static_configs:
+      - targets: ['localhost:3000']
+    metrics_path: /api/metrics
+
+  - job_name: 'node-exporter'
+    static_configs:
+      - targets: ['localhost:9100']
+
+# monitoring/grafana-dashboard.json
+{
+  "dashboard": {
+    "title": "BossBuddy Metrics",
+    "panels": [
+      {
+        "title": "Request Rate",
+        "targets": [
+          {
+            "expr": "rate(http_requests_total[5m])"
+          }
+        ]
+      },
+      {
+        "title": "Response Time",
+        "targets": [
+          {
+            "expr": "histogram_quantile(0.95, http_request_duration_seconds_bucket)"
+          }
+        ]
+      },
+      {
+        "title": "Active Users",
+        "targets": [
+          {
+            "expr": "bossbuddy_active_users"
+          }
+        ]
+      },
+      {
+        "title": "Revenue",
+        "targets": [
+          {
+            "expr": "bossbuddy_mrr"
+          }
+        ]
+      }
+    ]
+  }
+}
+
+# ===================================
+# DEPLOYMENT SCRIPTS
+# ===================================
+
+# scripts/deploy.sh
+#!/bin/bash
+set -e
+
+echo "🚀 Starting deployment process..."
+
+# Load environment
+source .env.production
+
+# Run tests
+echo "🧪 Running tests..."
+npm run test:ci
+
+# Build application
+echo "🏗️ Building application..."
+npm run build
+
+# Run database migrations
+echo "🗄️ Running database migrations..."
+npm run db:migrate:deploy
+
+# Deploy to Vercel
+echo "☁️ Deploying to Vercel..."
+vercel --prod --token=$VERCEL_TOKEN
+
+# Clear CDN cache
+echo "🧹 Clearing CDN cache..."
+curl -X POST "https://api.cloudflare.com/client/v4/zones/$CLOUDFLARE_ZONE_ID/purge_cache" \
+  -H "X-Auth-Email: $CLOUDFLARE_EMAIL" \
+  -H "X-Auth-Key: $CLOUDFLARE_API_KEY" \
+  -H "Content-Type: application/json" \
+  --data '{"purge_everything":true}'
+
+# Notify team
+echo "📢 Notifying team..."
+curl -X POST $SLACK_WEBHOOK_URL \
+  -H 'Content-type: application/json' \
+  --data '{"text":"🎉 BossBuddy deployed to production!"}'
+
+echo "✅ Deployment complete!"
+
+# ===================================
+# ROLLBACK SCRIPT
+# ===================================
+
+# scripts/rollback.sh
+#!/bin/bash
+set -e
+
+echo "🔄 Starting rollback process..."
+
+# Get previous deployment
+PREVIOUS_DEPLOYMENT=$(vercel ls --token=$VERCEL_TOKEN | grep "Production" | head -2 | tail -1 | awk '{print $1}')
+
+echo "📌 Rolling back to deployment: $PREVIOUS_DEPLOYMENT"
+
+# Promote previous deployment
+vercel promote $PREVIOUS_DEPLOYMENT --token=$VERCEL_TOKEN
+
+# Rollback database if needed
+read -p "Rollback database? (y/n) " -n 1 -r
+echo
+if [[ $REPLY =~ ^[Yy]$ ]]; then
+  npm run db:migrate:rollback
+fi
+
+echo "✅ Rollback complete!"
+
+# ===================================
+# HEALTH CHECK ENDPOINTS
+# ===================================
+
+# app/api/health/route.ts
+export async function GET() {
+  const health = {
+    status: 'healthy',
+    timestamp: new Date().toISOString(),
+    uptime: process.uptime(),
+    memory: process.memoryUsage(),
+    environment: process.env.NODE_ENV
+  };
+  
+  return Response.json(health);
+}
+
+# app/api/ready/route.ts
+export async function GET() {
+  try {
+    // Check database connection
+    await prisma.$queryRaw`SELECT 1`;
+    
+    // Check Redis connection
+    await redis.ping();
+    
+    // Check external services
+    const services = await Promise.all([
+      checkPayPal(),
+      checkOpenAI(),
+      checkEmail()
+    ]);
+    
+    const allHealthy = services.every(s => s.healthy);
+    
+    return Response.json({
+      ready: allHealthy,
+      services,
+      timestamp: new Date().toISOString()
+    }, {
+      status: allHealthy ? 200 : 503
+    });
+  } catch (error) {
+    return Response.json({
+      ready: false,
+      error: error.message
+    }, { status: 503 });
+  }
+}
