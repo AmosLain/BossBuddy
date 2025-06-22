@@ -1,0 +1,56 @@
+// src/lib/supabase.js
+import { createClient } from '@supabase/supabase-js'
+
+// DEBUG: Ensure env vars are loaded
+console.log(
+  '➜ SUPA_URL:', import.meta.env.VITE_SUPABASE_URL,
+  '➜ KEY_LEN:', import.meta.env.VITE_SUPABASE_ANON_KEY?.length
+);
+
+const SUPABASE_URL = import.meta.env.VITE_SUPABASE_URL;
+const SUPABASE_ANON_KEY = import.meta.env.VITE_SUPABASE_ANON_KEY;
+
+export const supabase = createClient(SUPABASE_URL, SUPABASE_ANON_KEY);
+
+/**
+ * Insert a new rewrite record into the 'usage' table.
+ */
+export async function trackRewrite(userId, original, rewritten, tone) {
+  try {
+    const { error } = await supabase
+      .from('usage')
+      .insert([{ user_id: userId, original, rewritten, tone, created_at: new Date() }]);
+    if (error) {
+      console.error('trackRewrite error:', error);
+    }
+  } catch (e) {
+    console.error('trackRewrite threw:', e);
+  }
+}
+
+/**
+ * Count how many rewrites the user has done today via a safe select.
+ */
+// Add this to your supabase.js file, replacing the existing checkDailyUsage function
+
+export async function checkDailyUsage(userId) {
+  const startOfToday = new Date();
+  startOfToday.setHours(0, 0, 0, 0);
+  
+  try {
+    const { count, error } = await supabase
+      .from('usage')
+      .select('id', { count: 'exact' })
+      .eq('user_id', userId)
+      .gte('created_at', startOfToday.toISOString()); // Convert to ISO string
+      
+    if (error) {
+      console.error('checkDailyUsage error:', error);
+      return 0;
+    }
+    return count || 0;
+  } catch (e) {
+    console.error('checkDailyUsage threw:', e);
+    return 0;
+  }
+}

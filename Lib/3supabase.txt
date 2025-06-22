@@ -1,0 +1,74 @@
+// src/lib/supabase.js
+import { createClient } from '@supabase/supabase-js';
+
+const supabaseUrl = 'https://wqjjijlhvlapmecioubn.supabase.co';
+const supabaseAnonKey = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6IndxamppamxodmxhcG1lY2lvdWJuIiwicm9sZSI6ImFub24iLCJpYXQiOjE3NTAwOTYxMzgsImV4cCI6MjA2NTY3MjEzOH0.F0csA_SBcrPuhQ33SiYwrGnUsPE6SDuJ2HQ0JLUcapY';
+
+export const supabase = createClient(supabaseUrl, supabaseAnonKey);
+
+// Track message rewrite
+export async function trackRewrite(userId, originalMessage, rewrittenMessage, tone) {
+  const { data, error } = await supabase
+    .from('usage_logs')
+    .insert({
+      user_id: userId,
+      action: 'message_rewritten',
+      original_message: originalMessage.substring(0, 500),
+      rewritten_message: rewrittenMessage.substring(0, 500),
+      tone: tone
+    });
+  
+  if (error) console.error('Error tracking rewrite:', error);
+  return { data, error };
+}
+
+// Check daily usage
+export async function checkDailyUsage(userId) {
+  const today = new Date();
+  today.setHours(0, 0, 0, 0);
+  
+  const { count, error } = await supabase
+    .from('usage_logs')
+    .select('*', { count: 'exact', head: true })
+    .eq('user_id', userId)
+    .eq('action', 'message_rewritten')
+    .gte('created_at', today.toISOString());
+    
+  if (error) {
+    console.error('Error checking usage:', error);
+    return 0;
+  }
+  
+  return count || 0;
+}
+
+// Get or create user
+export async function getOrCreateUser(email) {
+  // First try to find existing user
+  let { data: user, error } = await supabase
+    .from('users')
+    .select('*')
+    .eq('email', email)
+    .single();
+    
+  if (error && error.code === 'PGRST116') {
+    // User doesn't exist, create one
+    const { data: newUser, error: createError } = await supabase
+      .from('users')
+      .insert({ 
+        email,
+        plan: 'free'
+      })
+      .select()
+      .single();
+      
+    if (createError) {
+      console.error('Error creating user:', createError);
+      return null;
+    }
+    
+    return newUser;
+  }
+  
+  return user;
+}

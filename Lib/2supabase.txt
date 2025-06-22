@@ -1,0 +1,82 @@
+// lib/supabase.js
+import { createClient } from '@supabase/supabase-js';
+
+const supabaseUrl = 'https://wqjjijlhvlapmecioubn.supabase.co';
+const supabaseAnonKey = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6IndxamppamxodmxhcG1lY2lvdWJuIiwicm9sZSI6ImFub24iLCJpYXQiOjE3NTAwOTYxMzgsImV4cCI6MjA2NTY3MjEzOH0.F0csA_SBcrPuhQ33SiYwrGnUsPE6SDuJ2HQ0JLUcapY';
+
+export const supabase = createClient(supabaseUrl, supabaseAnonKey);
+
+// Auth helper functions
+export const signUp = async (email, password) => {
+  const { data, error } = await supabase.auth.signUp({
+    email,
+    password,
+  });
+  return { data, error };
+};
+
+export const signIn = async (email, password) => {
+  const { data, error } = await supabase.auth.signInWithPassword({
+    email,
+    password,
+  });
+  return { data, error };
+};
+
+export const signOut = async () => {
+  const { error } = await supabase.auth.signOut();
+  return { error };
+};
+
+export const getUser = async () => {
+  const { data: { user }, error } = await supabase.auth.getUser();
+  return { user, error };
+};
+
+// Database helper functions
+export const getUserProfile = async (userId) => {
+  const { data, error } = await supabase
+    .from('users')
+    .select('*')
+    .eq('id', userId)
+    .single();
+  return { data, error };
+};
+
+export const trackRewrite = async (userId, originalMessage, rewrittenMessage, tone) => {
+  const { data, error } = await supabase
+    .from('usage_logs')
+    .insert({
+      user_id: userId,
+      action: 'message_rewritten',
+      original_message: originalMessage.substring(0, 500),
+      rewritten_message: rewrittenMessage.substring(0, 500),
+      tone: tone,
+      metadata: { tone }
+    });
+  return { data, error };
+};
+
+export const getTodayUsageCount = async (userId) => {
+  const today = new Date();
+  today.setHours(0, 0, 0, 0);
+  
+  const { count, error } = await supabase
+    .from('usage_logs')
+    .select('*', { count: 'exact', head: true })
+    .eq('user_id', userId)
+    .eq('action', 'message_rewritten')
+    .gte('created_at', today.toISOString());
+    
+  return { count: count || 0, error };
+};
+
+export const checkUserPlan = async (userId) => {
+  const { data, error } = await supabase
+    .from('users')
+    .select('plan')
+    .eq('id', userId)
+    .single();
+    
+  return { plan: data?.plan || 'free', error };
+};
